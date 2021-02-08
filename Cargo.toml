@@ -1,0 +1,18 @@
+[package]
+name = "pmdfonttool"
+version = "1.0.0"
+authors = ["marius david <mariusdavid@laposte.net>"]
+edition = "2018"
+keywords = [ "cli" "font" ]
+repository = "https://github.com/marius851000/pmd_cte"
+categories = [ "cli" ]
+license = "CC0-1.0"
+description = "a library that can be used to modify pokemon super mystery dungeon fonts"
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = "3.0.0-beta.2"
+image = "0.23"
+anyhow = "1.0.0"
+pmd_cte = "1.0.0"
+pmd_dic = "1.0.0"
