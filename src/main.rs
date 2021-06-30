@@ -1,10 +1,10 @@
-use std::{
 use clap::Clap;
 use std::str::FromStr;
 use anyhow::{Context, Result};
 use pmd_dic::{KandChar, KandFile};
 use pmd_cte::{CteFormat, CteImage};
 use image::{DynamicImage, GenericImage, ImageBuffer, Rgba};
+use std::{
     fs::{create_dir_all, read_dir, File},
     path::PathBuf,
     u16,
