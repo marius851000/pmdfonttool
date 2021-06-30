@@ -1,10 +1,14 @@
-use anyhow::{Context, Result};
+use std::{
 use clap::Clap;
-use image::{DynamicImage, GenericImage, ImageBuffer, Rgba};
-use pmd_cte::{CteFormat, CteImage};
-use pmd_dic::{KandChar, KandFile};
-use std::{fs::{File, create_dir_all, read_dir}, path::PathBuf};
 use std::str::FromStr;
+use anyhow::{Context, Result};
+use pmd_dic::{KandChar, KandFile};
+use pmd_cte::{CteFormat, CteImage};
+use image::{DynamicImage, GenericImage, ImageBuffer, Rgba};
+    fs::{create_dir_all, read_dir, File},
+    path::PathBuf,
+    u16,
+};
 
 #[derive(Clap)]
 struct Opts {
@@ -48,6 +52,18 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+pub struct CharData {
+    pub char: u16,
+    pub glyth_width: u16,
+    pub glyth_height: u16,
+    pub unk1: u16,
+    pub unk2: u16,
+    pub distance: u16,
+    pub unk4: u16,
+    pub unk5: u16,
+    pub image: ImageBuffer<Rgba<u8>, Vec<u8>>,
+}
+
 fn generate(gp: GenerateParameter) -> Result<()> {
     println!("generating the editable font into {:?}", &gp.output);
     let mut input_kand = File::open(&gp.dic_input)?;
@@ -77,15 +93,11 @@ fn generate(gp: GenerateParameter) -> Result<()> {
 fn build(bp: BuildParameter) -> Result<()> {
     // TODO: start message
     // 1: read the input
-    let mut atlas_width = 512;
-    let mut chars = Vec::new();
-    let mut max_width = 0;
-    let mut lower_y = 0;
-    let mut pos_x = 0;
-    let mut pos_y = 0;
+    let mut chars_data = Vec::new();
     for char_file_maybe in read_dir(&bp.input)? {
         let char_file = char_file_maybe?;
         let char_path = char_file.path();
+        println!("{:?}", char_path);
         let stem = char_path
             .file_stem()
             .with_context(|| format!("the file at {:?} doesn't have a valid name", char_path))?
@@ -93,7 +105,7 @@ fn build(bp: BuildParameter) -> Result<()> {
         let mut splited = stem.split('_');
 
         let mut read_from_splited_u16 = || -> Result<u16> {
-            let section = splited.next().with_context(|| format!("the path {:?} doesn't have the good format of \"charid_unk1_unk2_unk3_unk4_unk5.ext\"", char_path))?;
+            let section = splited.next().with_context(|| format!("the path {:?} doesn't have the good format of \"charid_unk1_unk2_distance_unk4_unk5.ext\"", char_path))?;
             Ok(u16::from_str(section).with_context(|| {
                 format!(
                     "can't transform the text {:?} to a u16 character (for the file name at {:?})",
@@ -105,7 +117,7 @@ fn build(bp: BuildParameter) -> Result<()> {
         let char_id = read_from_splited_u16()?;
         let unk1 = read_from_splited_u16()?;
         let unk2 = read_from_splited_u16()?;
-        let unk3 = read_from_splited_u16()?;
+        let distance = read_from_splited_u16()?;
         let unk4 = read_from_splited_u16()?;
         let unk5 = read_from_splited_u16()?;
 
@@ -113,38 +125,64 @@ fn build(bp: BuildParameter) -> Result<()> {
         //TODO: what if they can't be transformed to as u16 ?
         let glyth_width = char_image.width() as u16;
         let glyth_height = char_image.height() as u16;
+        chars_data.push(CharData {
+            char: char_id,
+            glyth_height,
+            glyth_width,
+            unk1,
+            unk2,
+            distance,
+            unk4,
+            unk5,
+            image: char_image,
+        })
+    }
+
+    // sort the data
+    chars_data.sort_unstable_by_key(|x| x.char);
+
+    //TODO: error on identical key
+
+    // 2. create the atlas
+    let mut atlas_width = 512;
+    let mut chars = Vec::new();
+    let mut max_width = 0;
+    let mut lower_y = 0;
+    let mut pos_x = 0;
+    let mut pos_y = 0;
+
+    for char_data in chars_data {
         // also, place the char
-        let x_at_end_of_char = pos_x + glyth_width;
+        let x_at_end_of_char = pos_x + char_data.glyth_width;
         if x_at_end_of_char >= atlas_width {
             pos_x = 0;
             pos_y = lower_y;
         };
         let start_x = pos_x;
         let start_y = pos_y;
-        lower_y = lower_y.max(pos_y + glyth_height);
-        pos_x += glyth_width;
-        max_width = max_width.max(glyth_width);
+        lower_y = lower_y.max(pos_y + char_data.glyth_height);
+        pos_x += char_data.glyth_width;
+        max_width = max_width.max(char_data.glyth_width);
         let char = KandChar {
-            char: char_id,
+            char: char_data.char,
             start_x,
             start_y,
-            glyth_width,
-            glyth_height,
-            unk1,
-            unk2,
-            unk3,
-            unk4,
-            unk5,
+            glyth_width: char_data.glyth_width,
+            glyth_height: char_data.glyth_height,
+            unk1: char_data.unk1,
+            unk2: char_data.unk2,
+            unk3: char_data.distance,
+            unk4: char_data.unk4,
+            unk5: char_data.unk5,
         };
-        chars.push((char, char_image));
+        chars.push((char, char_data.image));
     }
-    // 2. create the atlas
+
     atlas_width = ((atlas_width.max(max_width) - 1) / 8 + 1) * 8;
     lower_y = ((lower_y - 1) / 8 + 1) * 8;
     let mut atlas: ImageBuffer<Rgba<u8>, Vec<u8>> =
         ImageBuffer::new(atlas_width as u32, lower_y as u32);
     for (char_data, char_image) in &chars {
-        println!("{}, {}", char_data.start_x, char_data.start_y);
         atlas.copy_from(
             char_image,
             char_data.start_x as u32,
