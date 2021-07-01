@@ -1,9 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::Clap;
 use fontdue::{Font, FontSettings};
 use image::{DynamicImage, GenericImage, ImageBuffer, ImageFormat, LumaA, Rgba};
 use pmd_cte::{CteFormat, CteImage};
 use pmd_dic::{KandChar, KandFile};
+use std::collections::BTreeMap;
+use std::convert::TryInto;
 use std::path::Path;
 use std::{fs::DirBuilder, io::Read, str::FromStr};
 use std::{
@@ -54,6 +56,9 @@ pub struct FromTruetypeParameter {
     input: PathBuf,
     /// the output folder
     output: PathBuf,
+    /// the height of the generated font
+    #[clap(default_value = "18")]
+    scale: u16,
 }
 
 fn main() -> Result<()> {
@@ -69,11 +74,10 @@ fn main() -> Result<()> {
 }
 
 pub struct CharData {
-    pub char: u16,
     pub glyth_width: u16,
     pub glyth_height: u16,
-    pub unk1: i16, //TODO: seems to be xmin
-    pub unk2: i16, //TODO: seems to by ymin
+    pub xalign: i16,
+    pub yalign: i16,
     pub distance: u16,
     pub unk4: u16,
     pub unk5: u16,
@@ -107,13 +111,12 @@ fn generate(gp: GenerateParameter) -> Result<()> {
 }
 
 fn build(bp: BuildParameter) -> Result<()> {
-    // TODO: start message
+    println!("starting the generation of {:?} and {:?}", bp.dic_output, bp.img_output);
     // 1: read the input
-    let mut chars_data = Vec::new();
+    let mut chars_data = BTreeMap::new();
     for char_file_maybe in read_dir(&bp.input)? {
         let char_file = char_file_maybe?;
         let char_path = char_file.path();
-        println!("{:?}", char_path);
         let stem = char_path
             .file_stem()
             .with_context(|| format!("the file at {:?} doesn't have a valid name", char_path))?
@@ -151,28 +154,23 @@ fn build(bp: BuildParameter) -> Result<()> {
         let unk4 = read_u16_from_splited(&mut splited, &char_path)?;
         let unk5 = read_u16_from_splited(&mut splited, &char_path)?;
 
-        let char_image = image::io::Reader::open(char_path)?.decode()?.to_rgba8();
-        //TODO: what if they can't be transformed to as u16 ?
-        let glyth_width = char_image.width() as u16;
-        let glyth_height = char_image.height() as u16;
-        chars_data.push(CharData {
-            char: char_id,
+        let char_image = image::io::Reader::open(&char_path)?.decode()?.to_rgba8();
+        let glyth_width = char_image.width().try_into().context("The width of the glyth is to big")?;
+        let glyth_height = char_image.height().try_into().context("The height of the glyth is too big")?;
+        if let Some(_) = chars_data.insert(char_id, CharData {
             glyth_height,
             glyth_width,
-            unk1,
-            unk2,
+            xalign: unk1,
+            yalign: unk2,
             distance,
             unk4,
             unk5,
             image: char_image,
-        })
+        }) {
+            return Err(anyhow!("The file {:?} represent a character that is also used by another file", char_path));
+        }
     }
-
-    // sort the data
-    chars_data.sort_unstable_by_key(|x| x.char);
-
-    //TODO: error on identical key
-
+    
     // 2. create the atlas
     let mut atlas_width = 512;
     let mut chars = Vec::new();
@@ -181,7 +179,7 @@ fn build(bp: BuildParameter) -> Result<()> {
     let mut pos_x = 0;
     let mut pos_y = 0;
 
-    for char_data in chars_data {
+    for (char_id, char_data) in chars_data {
         // also, place the char
         let x_at_end_of_char = pos_x + char_data.glyth_width;
         if x_at_end_of_char >= atlas_width {
@@ -194,13 +192,13 @@ fn build(bp: BuildParameter) -> Result<()> {
         pos_x += char_data.glyth_width;
         max_width = max_width.max(char_data.glyth_width);
         let char = KandChar {
-            char: char_data.char,
+            char: char_id,
             start_x,
             start_y,
             glyth_width: char_data.glyth_width,
             glyth_height: char_data.glyth_height,
-            unk1: char_data.unk1,
-            unk2: char_data.unk2,
+            unk1: char_data.xalign,
+            unk2: char_data.yalign,
             distance: char_data.distance,
             unk4: char_data.unk4,
             unk5: char_data.unk5,
@@ -247,8 +245,6 @@ pub fn from_truetype(fp: FromTruetypeParameter) -> Result<()> {
         .create(&fp.output)
         .with_context(|| format!("can't create the target directory {:?}", fp.output))?;
 
-    let scale = 14; //TODO: allow the user to change this value
-
     let mut ttf_file =
         File::open(&fp.input).with_context(|| format!("can't open the file at {:?}", fp.input))?;
     let mut ttf_bytes = Vec::new();
@@ -261,7 +257,7 @@ pub fn from_truetype(fp: FromTruetypeParameter) -> Result<()> {
     let ttf_font = Font::from_bytes(
         ttf_bytes,
         FontSettings {
-            scale: scale as f32,
+            scale: fp.scale as f32,
             ..Default::default()
         },
     )
@@ -277,8 +273,8 @@ pub fn from_truetype(fp: FromTruetypeParameter) -> Result<()> {
     ];
 
     for char in chars_to_include {
-        println!("rasterizing {:?}", chars_to_include);
-        let (metric, bitmap_luminance) = ttf_font.rasterize(*char, scale as f32);
+        println!("rasterizing {:?}", char);
+        let (metric, bitmap_luminance) = ttf_font.rasterize(*char, fp.scale as f32);
         let mut bitmap: Vec<u8> = Vec::new();
         for pixel in bitmap_luminance.into_iter() {
             bitmap.push(0);
@@ -288,7 +284,7 @@ pub fn from_truetype(fp: FromTruetypeParameter) -> Result<()> {
             ImageBuffer::from_vec(metric.width as u32, metric.height as u32, bitmap)
                 .with_context(|| format!("can't read the decoded character {:?}", char))?;
         //TODO: better parameter
-        let file_name = format!("{}_{}_{}_{}_10_10.png", *char as u16, metric.xmin as i16, -metric.ymin as i16 + scale as i16 - metric.height as i16, metric.advance_width as i16);
+        let file_name = format!("{}_{}_{}_{}_10_10.png", *char as u16, metric.xmin as i16, -metric.ymin as i16 + fp.scale as i16 - metric.height as i16, metric.advance_width as i16);
         let mut out_char_path = fp.output.clone();
         out_char_path.push(file_name);
         char_image
