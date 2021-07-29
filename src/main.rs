@@ -5,6 +5,7 @@ use image::{DynamicImage, GenericImage, ImageBuffer, ImageFormat, LumaA, Rgba};
 use pmd_cte::{CteFormat, CteImage};
 use pmd_dic::{KandChar, KandFile};
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::convert::TryInto;
 use std::path::Path;
 use std::{fs::DirBuilder, io::Read, str::FromStr};
@@ -52,6 +53,8 @@ pub struct BuildParameter {
 
 #[derive(Clap)]
 pub struct FromTruetypeParameter {
+    /// a file listing every character to be exported (UTF-8, can be present multiple time)
+    char_list_path: PathBuf,
     /// the input TrueType font
     input: PathBuf,
     /// the output folder
@@ -245,6 +248,17 @@ pub fn from_truetype(fp: FromTruetypeParameter) -> Result<()> {
         .create(&fp.output)
         .with_context(|| format!("can't create the target directory {:?}", fp.output))?;
 
+    // list char to export
+    let mut chars_to_include: BTreeSet<char> = BTreeSet::new();
+    let mut char_list_file = File::open(&fp.char_list_path).context("can't open the file containing the list of char")?;
+    let mut char_list_buffer = Vec::new();
+    char_list_file.read_to_end(&mut char_list_buffer).context("can't read the file containing the char list")?;
+    let char_list_string = String::from_utf8(char_list_buffer).context("The file contining the char list isn't a valid UTF-8 file")?;
+    for chara in char_list_string.chars() {
+        chars_to_include.insert(chara);
+    };
+
+    // read font
     let mut ttf_file =
         File::open(&fp.input).with_context(|| format!("can't open the file at {:?}", fp.input))?;
     let mut ttf_bytes = Vec::new();
@@ -263,28 +277,23 @@ pub fn from_truetype(fp: FromTruetypeParameter) -> Result<()> {
     )
     .unwrap(); //TODO: make it work with anyhow
 
-    // TODO: allow the user to select this list manually... Or export all chars from the font file...
-
-    let chars_to_include = &[
-        'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r',
-        's', 't', 'u', 'v', 'w', 'x', 'y', 'z', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J',
-        'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
-        '(', ')', '.', '\'', '`', '"', '€', 'ŧ'
-    ];
-
     for char in chars_to_include {
         println!("rasterizing {:?}", char);
-        let (metric, bitmap_luminance) = ttf_font.rasterize(*char, fp.scale as f32);
-        let mut bitmap: Vec<u8> = Vec::new();
-        for pixel in bitmap_luminance.into_iter() {
-            bitmap.push(0);
-            bitmap.push(pixel);
-        };
-        let char_image: ImageBuffer<LumaA<u8>, Vec<_>> =
+        let (metric, bitmap_luminance) = ttf_font.rasterize(char, fp.scale as f32);
+        let char_image: ImageBuffer<LumaA<u8>, Vec<_>> = if metric.width != 0 && metric.height != 0 {
+            let mut bitmap: Vec<u8> = Vec::new();
+            for pixel in bitmap_luminance.into_iter() {
+                bitmap.push(0);
+                bitmap.push(pixel);
+            };
             ImageBuffer::from_vec(metric.width as u32, metric.height as u32, bitmap)
-                .with_context(|| format!("can't read the decoded character {:?}", char))?;
+                    .with_context(|| format!("can't read the decoded character {:?}", char))?
+
+        } else {
+            ImageBuffer::new(1, 1)
+        };
         //TODO: better parameter
-        let file_name = format!("{}_{}_{}_{}_10_10.png", *char as u16, metric.xmin as i16, -metric.ymin as i16 + fp.scale as i16 - metric.height as i16, metric.advance_width as i16);
+        let file_name = format!("{}_{}_{}_{}_10_10.png", char as u16, metric.xmin as i16, -metric.ymin as i16 + fp.scale as i16 - metric.height as i16, metric.advance_width as i16);
         let mut out_char_path = fp.output.clone();
         out_char_path.push(file_name);
         char_image
